@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 import re
 
 try:
-    from openpyxl import Workbook
+    from openpyxl import Workbook, load_workbook
     from openpyxl.formatting.rule import CellIsRule
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.worksheet.table import Table, TableStyleInfo
@@ -27,13 +28,34 @@ BASE_HEADERS = [
     "Сумма баллов по предметам",
     "Сумма баллов за инд.дост.",
     "Согласие на зачисление",
+    "Примечание",
 ]
 EMAIL_COLUMN = 2
 EXTRA_QUOTAS_HEADER = "Дополнительные квоты"
 SHORT_NAMES_BY_FACULTY = load_direction_short_names()
 
 
-def write_result_xlsx(parse_result: ParseResult, output_path: str | Path) -> Path:
+@dataclass(frozen=True)
+class ExistingWorkbookData:
+    path: Path
+    faculty: str
+    notes_by_applicant: dict[str, str]
+    priorities_by_applicant: dict[str, dict[str, str]]
+
+
+@dataclass(frozen=True)
+class PriorityCheckResult:
+    changed: int
+    unchanged: int
+    added: int
+    missing: int
+
+
+def write_result_xlsx(
+    parse_result: ParseResult,
+    output_path: str | Path,
+    notes_by_applicant: dict[str, str] | None = None,
+) -> Path:
     path = Path(output_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -44,11 +66,94 @@ def write_result_xlsx(parse_result: ParseResult, output_path: str | Path) -> Pat
     statistics_sheet = workbook.create_sheet("Статистика")
 
     _fill_readme(readme_sheet, parse_result)
-    _fill_applicants(applicants_sheet, parse_result)
+    _fill_applicants(applicants_sheet, parse_result, notes_by_applicant or {})
     _fill_statistics(statistics_sheet, parse_result)
 
     workbook.save(path)
     return path
+
+
+def read_existing_workbook(workbook_path: str | Path) -> ExistingWorkbookData:
+    path = Path(workbook_path).expanduser().resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"Файл не найден: {path}")
+    if path.suffix.lower() != ".xlsx":
+        raise ValueError("Ожидается существующий XLSX-файл.")
+
+    workbook = load_workbook(path, read_only=True, data_only=False)
+    try:
+        if "Абитуриенты" not in workbook.sheetnames:
+            raise ValueError("В XLSX-файле отсутствует лист 'Абитуриенты'.")
+
+        sheet = workbook["Абитуриенты"]
+        headers = {
+            str(cell.value).strip(): cell.column
+            for cell in sheet[1]
+            if cell.value is not None and str(cell.value).strip()
+        }
+        required_headers = {"ФИО", "Email", EXTRA_QUOTAS_HEADER}
+        missing_headers = required_headers - headers.keys()
+        if missing_headers:
+            missing = ", ".join(sorted(missing_headers))
+            raise ValueError(f"В листе 'Абитуриенты' отсутствуют столбцы: {missing}.")
+
+        notes: dict[str, str] = {}
+        priorities: dict[str, dict[str, str]] = {}
+        priority_columns = {
+            header: column
+            for header, column in headers.items()
+            if column >= headers[EXTRA_QUOTAS_HEADER]
+        }
+        note_column = headers.get("Примечание")
+
+        for row_index in range(2, sheet.max_row + 1):
+            fio = _cell_text(sheet.cell(row=row_index, column=headers["ФИО"]).value)
+            email = _cell_text(sheet.cell(row=row_index, column=headers["Email"]).value)
+            applicant_key = _applicant_key(email, fio)
+            if not applicant_key:
+                continue
+
+            note = (
+                _cell_text(sheet.cell(row=row_index, column=note_column).value)
+                if note_column is not None
+                else ""
+            )
+            if note:
+                notes[applicant_key] = _merge_note_values(notes.get(applicant_key, ""), note)
+
+            priorities[applicant_key] = {
+                header: value
+                for header, column in priority_columns.items()
+                if (value := _cell_text(sheet.cell(row=row_index, column=column).value))
+            }
+
+        return ExistingWorkbookData(
+            path=path,
+            faculty=_read_workbook_faculty(workbook),
+            notes_by_applicant=notes,
+            priorities_by_applicant=priorities,
+        )
+    finally:
+        workbook.close()
+
+
+def compare_priorities(
+    previous: ExistingWorkbookData,
+    current: ExistingWorkbookData,
+) -> PriorityCheckResult:
+    previous_keys = set(previous.priorities_by_applicant)
+    current_keys = set(current.priorities_by_applicant)
+    common_keys = previous_keys & current_keys
+    changed = sum(
+        previous.priorities_by_applicant[key] != current.priorities_by_applicant[key]
+        for key in common_keys
+    )
+    return PriorityCheckResult(
+        changed=changed,
+        unchanged=len(common_keys) - changed,
+        added=len(current_keys - previous_keys),
+        missing=len(previous_keys - current_keys),
+    )
 
 
 def _fill_readme(sheet, parse_result: ParseResult) -> None:
@@ -60,6 +165,11 @@ def _fill_readme(sheet, parse_result: ParseResult) -> None:
         ("Телефон", "Телефоны приведены к единому виду. Если телефонов несколько, каждый указан с новой строки внутри ячейки."),
         ("Баллы", "Сумма баллов, сумма баллов по предметам и баллы за индивидуальные достижения вынесены в отдельные узкие столбцы."),
         ("Согласие на зачисление", "Значение 'Да' означает, что в исходном PDF было отмечено согласие на зачисление."),
+        ("Примечание", "Свободное поле для рабочих заметок. При обновлении существующего XLSX примечания переносятся по Email."),
+        (
+            "Обновление файла",
+            "Если при запуске указать существующий XLSX, приложение обновит список, приоритеты и статистику по новому PDF, сохранив примечания.",
+        ),
         ("Дополнительные квоты", "Не-бюджетные заявления записаны кратко: сокращение направления, дефис, приоритет и код квоты. Например: ИВТ-7П."),
         ("Бюджетные направления", "Столбцы с сокращениями направлений показывают только бюджетный приоритет числом."),
         (
@@ -101,7 +211,11 @@ def _fill_readme(sheet, parse_result: ParseResult) -> None:
             cell.alignment = Alignment(vertical="top", wrap_text=True)
 
 
-def _fill_applicants(sheet, parse_result: ParseResult) -> None:
+def _fill_applicants(
+    sheet,
+    parse_result: ParseResult,
+    notes_by_applicant: dict[str, str],
+) -> None:
     header_fill = PatternFill("solid", fgColor="D9EAF7")
     alternate_row_fill = PatternFill("solid", fgColor="F4F8FB")
     bold = Font(bold=True)
@@ -137,6 +251,7 @@ def _fill_applicants(sheet, parse_result: ParseResult) -> None:
             applicant.subject_score,
             applicant.achievement_score,
             "Да" if applicant.consent else "",
+            notes_by_applicant.get(_applicant_key(applicant.email, applicant.fio), ""),
             _format_extra_quotas(applicant.priorities, directions, parse_result.faculty),
         ]
         for value_index, value in enumerate(values, start=1):
@@ -169,7 +284,8 @@ def _fill_applicants(sheet, parse_result: ParseResult) -> None:
         5: 11,
         6: 11,
         7: 16,
-        8: 30,
+        8: 28,
+        9: 30,
     }
     for col_index, width in widths.items():
         sheet.column_dimensions[get_column_letter(col_index)].width = width
@@ -316,7 +432,6 @@ def _write_summary_statistics(
     bold: Font,
 ) -> int:
     rows = [
-        ("Исходный файл", parse_result.source_path),
         ("Факультет", parse_result.faculty),
         ("Дата формирования XLSX", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
         ("Страниц PDF", parse_result.pages_count),
@@ -495,6 +610,41 @@ def _write_table(
         _add_table_filter(sheet, table_name, header_row, end_row, len(headers))
 
     return end_row
+
+
+def _read_workbook_faculty(workbook) -> str:
+    if "Статистика" not in workbook.sheetnames:
+        return ""
+
+    for label, value in workbook["Статистика"].iter_rows(
+        min_col=1,
+        max_col=2,
+        values_only=True,
+    ):
+        if _cell_text(label) == "Факультет":
+            return _cell_text(value)
+    return ""
+
+
+def _applicant_key(email: str, fio: str) -> str:
+    normalized_email = email.strip().casefold()
+    if normalized_email:
+        return f"email:{normalized_email}"
+
+    normalized_fio = re.sub(r"\s+", " ", fio).strip().casefold()
+    return f"fio:{normalized_fio}" if normalized_fio else ""
+
+
+def _cell_text(value) -> str:
+    return "" if value is None else str(value).strip()
+
+
+def _merge_note_values(existing: str, new_value: str) -> str:
+    if not existing:
+        return new_value
+    if new_value == existing or new_value in existing.splitlines():
+        return existing
+    return f"{existing}\n{new_value}"
 
 
 def _budget_priority_bucket(priority: str) -> str:
