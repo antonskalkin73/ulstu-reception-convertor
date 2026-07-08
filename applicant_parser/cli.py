@@ -7,22 +7,23 @@ from datetime import datetime
 from datetime import date
 from pathlib import Path
 
-from .config import INPUT_TYPE_DEANS_LIST
+from .config import INPUT_TYPE_DEANS_LIST, ensure_short_names_file
 from .pdf_parser import parse_deans_list_pdf, split_result_by_faculty
 from .xlsx_writer import write_result_xlsx
 
 
 def main(argv: list[str] | None = None) -> None:
     _configure_console_output()
+    short_names_path = ensure_short_names_file()
     args = _build_parser().parse_args(argv)
 
     if args.input:
         input_path = _strip_outer_quotes(args.input)
         output_dir = Path(args.output_dir) if args.output_dir else _default_output_dir(INPUT_TYPE_DEANS_LIST)
-        _process_deans_list(input_path, output_dir)
+        _process_deans_list(input_path, output_dir, args.faculty)
         return
 
-    _run_menu()
+    _run_menu(short_names_path)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -39,31 +40,35 @@ def _build_parser() -> argparse.ArgumentParser:
         "--output-dir",
         help="Каталог для результата. По умолчанию: Результаты/<дата>_СписокДеканам.",
     )
+    parser.add_argument(
+        "-f",
+        "--faculty",
+        help="Код факультета для выгрузки. Пусто или 0 - создать файлы для всех факультетов.",
+    )
     return parser
 
 
-def _run_menu() -> None:
+def _run_menu(short_names_path: Path) -> None:
     print("Парсер абитуриентов из PDF")
-    print("1. Список деканам")
-    print("0. Выход")
+    print(f"Файл сокращений направлений: {short_names_path}")
+    print("Введите код факультета, например ФИСТ.")
+    print("Оставьте пустым или введите 0, чтобы создать файлы для всех факультетов.")
 
-    choice = input("Выберите вид входного файла: ").strip()
-    if choice == "0":
-        print("Выход.")
-        return
-    if choice != "1":
-        print("Пока поддерживается только пункт 1: Список деканам.")
-        return
-
+    faculty = input("Факультет: ").strip()
     input_path = _strip_outer_quotes(input("Введите путь к PDF-файлу: "))
     output_dir = _default_output_dir(INPUT_TYPE_DEANS_LIST)
-    _process_deans_list(input_path, output_dir)
+    _process_deans_list(input_path, output_dir, faculty)
 
 
-def _process_deans_list(input_path: str, output_dir: Path) -> None:
+def _process_deans_list(input_path: str, output_dir: Path, faculty: str | None = None) -> None:
     print("Читаю PDF...")
     parse_result = parse_deans_list_pdf(input_path)
     faculty_results = split_result_by_faculty(parse_result)
+    faculty_results = _filter_faculty_results(faculty_results, faculty)
+    if not faculty_results:
+        available = ", ".join(sorted({result.faculty for result in split_result_by_faculty(parse_result)}))
+        print(f"Факультет не найден. Доступные факультеты: {available}")
+        return
 
     source_stem = _safe_filename(Path(parse_result.source_path).stem)
 
@@ -85,6 +90,13 @@ def _process_deans_list(input_path: str, output_dir: Path) -> None:
             f"уникальных абитуриентов {len(faculty_result.applicants)}"
         )
         print(f"Файл: {result_path}")
+
+
+def _filter_faculty_results(faculty_results: list, faculty: str | None) -> list:
+    faculty_code = (faculty or "").strip()
+    if not faculty_code or faculty_code == "0":
+        return faculty_results
+    return [result for result in faculty_results if result.faculty.casefold() == faculty_code.casefold()]
 
 
 def _default_output_dir(input_type: str) -> Path:

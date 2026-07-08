@@ -1,5 +1,53 @@
-/.agents
-/.pip-cache
-/__pycache__
-/Результаты
-/ТестовыеДанные
+# Local agent / IDE state
+/.agents/
+/.codex/
+.vscode/
+.idea/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Dependency caches
+/.pip-cache/
+/.npm-cache/
+
+# Build / packaging artifacts
+build/
+dist/
+*.egg-info/
+*.spec
+
+# Generated output and local test input
+/Результаты/
+/ТестовыеДанные/
+
+# Excel / Office temporary lock files
+~$*.xlsx
+~$*.xls
+~$*.docx
+~$*.pptx
+
+# Logs and local scratch files
+*.log
+*.tmp
+tmp/
+scratch/
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
