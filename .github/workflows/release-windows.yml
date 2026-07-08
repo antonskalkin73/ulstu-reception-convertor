@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*.*.*"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -14,6 +15,7 @@ jobs:
     env:
       APP_ENTRYPOINT: main.py
       APP_NAME: ulstu-reception-convertor
+      CONFIG_FILE: direction_short_names.ini
 
     steps:
       - name: Checkout repository
@@ -28,17 +30,25 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          if (Test-Path requirements.txt) {
-            python -m pip install -r requirements.txt
-          } else {
-            Write-Host "requirements.txt not found, skipping project dependency installation."
-          }
+          python -m pip install -r requirements.txt
           python -m pip install pyinstaller
+
+      - name: Validate release config file
+        shell: pwsh
+        run: |
+          if (!(Test-Path $env:CONFIG_FILE)) {
+            throw "Required config file was not found: $env:CONFIG_FILE"
+          }
 
       - name: Build EXE
         shell: pwsh
         run: |
-          pyinstaller --clean --onefile --name $env:APP_NAME $env:APP_ENTRYPOINT
+          pyinstaller `
+            --clean `
+            --onefile `
+            --name $env:APP_NAME `
+            --add-data "$env:CONFIG_FILE;." `
+            $env:APP_ENTRYPOINT
 
       - name: Validate EXE
         shell: pwsh
@@ -49,18 +59,48 @@ jobs:
           }
           & $exePath --help
 
-      - name: Create GitHub Release and upload EXE
+      - name: Prepare release assets
+        shell: pwsh
+        run: |
+          $releaseDir = ".\release"
+          New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
+
+          Copy-Item ".\dist\$env:APP_NAME.exe" "$releaseDir\$env:APP_NAME.exe" -Force
+          Copy-Item ".\$env:CONFIG_FILE" "$releaseDir\$env:CONFIG_FILE" -Force
+
+          Compress-Archive `
+            -Path "$releaseDir\$env:APP_NAME.exe", "$releaseDir\$env:CONFIG_FILE" `
+            -DestinationPath "$releaseDir\$env:APP_NAME-windows.zip" `
+            -Force
+
+          Get-ChildItem $releaseDir
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-windows
+          path: |
+            release/${{ env.APP_NAME }}.exe
+            release/${{ env.CONFIG_FILE }}
+            release/${{ env.APP_NAME }}-windows.zip
+
+      - name: Create GitHub Release and upload assets
+        if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = $env:GITHUB_REF_NAME
-          $asset = ".\dist\$env:APP_NAME.exe"
+          $assets = @(
+            ".\release\$env:APP_NAME.exe",
+            ".\release\$env:CONFIG_FILE",
+            ".\release\$env:APP_NAME-windows.zip"
+          )
+
           if (gh release view $tag 2>$null) {
-            gh release upload $tag $asset --clobber
+            gh release upload $tag @assets --clobber
           } else {
-            gh release create $tag `
-              $asset `
+            gh release create $tag @assets `
               --title $tag `
-              --notes "Автоматическая сборка Windows EXE"
+              --notes "Автоматическая сборка Windows EXE. Скачайте ZIP, чтобы exe и файл direction_short_names.ini лежали рядом."
           }
