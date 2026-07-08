@@ -54,7 +54,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create $env:GITHUB_REF_NAME `
-            .\dist\$env:APP_NAME.exe `
-            --title $env:GITHUB_REF_NAME `
-            --notes "Автоматическая сборка Windows EXE"
+          $tag = $env:GITHUB_REF_NAME
+          $asset = ".\dist\$env:APP_NAME.exe"
+          if (gh release view $tag 2>$null) {
+            gh release upload $tag $asset --clobber
+          } else {
+            gh release create $tag `
+              $asset `
+              --title $tag `
+              --notes "Автоматическая сборка Windows EXE"
+          }
