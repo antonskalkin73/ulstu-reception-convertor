@@ -16,7 +16,7 @@ except ImportError as exc:  # pragma: no cover - user-facing guard
         "Не установлен openpyxl. Выполните: python -m pip install -r requirements.txt"
     ) from exc
 
-from .config import DIRECTION_SHORT_NAMES, DIRECTIONS, QUOTAS
+from .config import DIRECTION_SHORT_NAMES, DIRECTIONS, QUOTAS, load_direction_short_names
 from .models import ParseResult
 
 BASE_HEADERS = [
@@ -30,6 +30,7 @@ BASE_HEADERS = [
 ]
 EMAIL_COLUMN = 2
 EXTRA_QUOTAS_HEADER = "Дополнительные квоты"
+SHORT_NAMES_BY_FACULTY = load_direction_short_names()
 
 
 def write_result_xlsx(parse_result: ParseResult, output_path: str | Path) -> Path:
@@ -52,19 +53,34 @@ def write_result_xlsx(parse_result: ParseResult, output_path: str | Path) -> Pat
 
 def _fill_readme(sheet, parse_result: ParseResult) -> None:
     rows = [
-        ("Назначение", f"Полная выгрузка данных по {parse_result.faculty} из PDF 'Список деканам'."),
-        ("Факультет", parse_result.faculty),
-        ("Дата формирования XLSX", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-        ("Страниц PDF", parse_result.pages_count),
-        ("Строк заявлений", len(parse_result.records)),
-        ("Уникальных абитуриентов", len(parse_result.applicants)),
-        ("Конкурсных групп ФИСТ", len(parse_result.groups)),
-        ("Дополнительные квоты", "Не-бюджетные заявления в виде: направление-приоритет+квота."),
-        ("Бюджетные приоритеты", "В столбцах направлений выводится только квота Бюджет."),
+        ("Что это за файл", "Выгрузка абитуриентов из PDF 'Список деканам'. Каждый абитуриент показан один раз: повторные заявления объединяются по Email."),
+        ("Лист Абитуриенты", "Основной рабочий лист для обзвона, фильтрации и сортировки поступающих."),
+        ("ФИО", "ФИО абитуриента из исходного PDF."),
+        ("Email", "Используется как уникальный идентификатор абитуриента. По нему объединяются повторяющиеся заявления."),
+        ("Телефон", "Телефоны приведены к единому виду. Если телефонов несколько, каждый указан с новой строки внутри ячейки."),
+        ("Баллы", "Сумма баллов, сумма баллов по предметам и баллы за индивидуальные достижения вынесены в отдельные узкие столбцы."),
+        ("Согласие на зачисление", "Значение 'Да' означает, что в исходном PDF было отмечено согласие на зачисление."),
+        ("Дополнительные квоты", "Не-бюджетные заявления записаны кратко: сокращение направления, дефис, приоритет и код квоты. Например: ИВТ-7П."),
+        ("Бюджетные направления", "Столбцы с сокращениями направлений показывают только бюджетный приоритет числом."),
         (
-            "Обозначения приоритетов",
-            "Бюджет без суффикса; ОК - отдельная квота; ОсК - особая квота; "
-            "П - платно; Ц - целевая; ? - другое.",
+            "Цветная заливка",
+            "В бюджетных столбцах условное форматирование подсвечивает приоритеты 1-3: 1 зеленым, 2 светло-зеленым, 3 желтым.",
+        ),
+        (
+            "Как пользоваться",
+            "Можно фильтровать по согласию, сортировать по баллам или по приоритету нужного направления, а также смотреть дополнительные квоты отдельным столбцом.",
+        ),
+        (
+            "Сортировка по приоритету",
+            "Чтобы увидеть самых заинтересованных абитуриентов по направлению, отсортируйте соответствующий бюджетный столбец по возрастанию: 1, затем 2, затем 3.",
+        ),
+        (
+            "Лист Статистика",
+            "На листе собраны сведения о документе, количество заявлений, уникальных абитуриентов и сводки по направлениям/квотам.",
+        ),
+        (
+            "Сокращения направлений",
+            "Короткие названия направлений можно редактировать в файле direction_short_names.ini рядом с приложением.",
         ),
     ]
 
@@ -105,7 +121,7 @@ def _fill_applicants(sheet, parse_result: ParseResult) -> None:
         direction_cell = sheet.cell(
             row=1,
             column=col_index,
-            value=_direction_short_name(direction),
+            value=_direction_short_name(direction, parse_result.faculty),
         )
         direction_cell.font = bold
         direction_cell.fill = header_fill
@@ -121,7 +137,7 @@ def _fill_applicants(sheet, parse_result: ParseResult) -> None:
             applicant.subject_score,
             applicant.achievement_score,
             "Да" if applicant.consent else "",
-            _format_extra_quotas(applicant.priorities, directions),
+            _format_extra_quotas(applicant.priorities, directions, parse_result.faculty),
         ]
         for value_index, value in enumerate(values, start=1):
             sheet.cell(row=row_index, column=value_index, value=value)
@@ -169,10 +185,10 @@ def _fill_applicants(sheet, parse_result: ParseResult) -> None:
             )
 
 
-def _format_extra_quotas(priorities: dict[tuple[str, str], str], directions: list[str]) -> str:
+def _format_extra_quotas(priorities: dict[tuple[str, str], str], directions: list[str], faculty: str) -> str:
     values = []
     for direction in directions:
-        direction_short_name = _direction_short_name(direction)
+        direction_short_name = _direction_short_name(direction, faculty)
         for quota in QUOTAS:
             if quota == "Бюджет":
                 continue
@@ -300,11 +316,15 @@ def _write_summary_statistics(
     bold: Font,
 ) -> int:
     rows = [
+        ("Исходный файл", parse_result.source_path),
+        ("Факультет", parse_result.faculty),
+        ("Дата формирования XLSX", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        ("Страниц PDF", parse_result.pages_count),
         ("Всего заявлений", len(parse_result.records)),
         ("Уникальных абитуриентов", len(parse_result.applicants)),
         ("Заявлений с согласием", sum(1 for record in parse_result.records if record.consent)),
         ("Уникальных абитуриентов с согласием", sum(1 for applicant in parse_result.applicants if applicant.consent)),
-        ("Конкурсных групп ФИСТ", len(parse_result.groups)),
+        ("Конкурсных групп", len(parse_result.groups)),
     ]
     return _write_table(
         sheet,
@@ -335,7 +355,7 @@ def _write_records_by_direction_and_quota(
     rows = []
     for direction in directions:
         values = [counts[(direction, quota)] for quota in QUOTAS]
-        rows.append([_direction_short_name(direction), *values, sum(values)])
+        rows.append([_direction_short_name(direction, parse_result.faculty), *values, sum(values)])
 
     quota_totals = [sum(counts[(direction, quota)] for direction in directions) for quota in QUOTAS]
     rows.append(["Итого", *quota_totals, sum(quota_totals)])
@@ -374,7 +394,7 @@ def _write_budget_priority_statistics(
     rows = []
     for direction in directions:
         values = [counts[direction][column] for column in priority_columns]
-        rows.append([_direction_short_name(direction), *values, sum(values)])
+        rows.append([_direction_short_name(direction, parse_result.faculty), *values, sum(values)])
 
     totals = [sum(counts[direction][column] for direction in directions) for column in priority_columns]
     rows.append(["Итого", *totals, sum(totals)])
@@ -418,7 +438,7 @@ def _write_extra_quota_statistics(
     rows = []
     for direction in directions:
         values = [counts[direction][quota] for quota in extra_quotas]
-        rows.append([_direction_short_name(direction), *values, sum(values)])
+        rows.append([_direction_short_name(direction, parse_result.faculty), *values, sum(values)])
 
     totals = [sum(counts[direction][quota] for direction in directions) for quota in extra_quotas]
     rows.append(["Итого", *totals, sum(totals)])
@@ -507,7 +527,10 @@ def _directions_for_result(parse_result: ParseResult) -> list[str]:
     return known_order + other_directions
 
 
-def _direction_short_name(direction: str) -> str:
+def _direction_short_name(direction: str, faculty: str) -> str:
+    faculty_short_names = SHORT_NAMES_BY_FACULTY.get(faculty, {})
+    if direction in faculty_short_names:
+        return faculty_short_names[direction]
     if direction in DIRECTION_SHORT_NAMES:
         return DIRECTION_SHORT_NAMES[direction]
 
